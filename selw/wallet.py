@@ -14,6 +14,7 @@ class Wallet(object):
         self.scriptpubkey = scriptpubkey
         self.private_blinding_key = private_blinding_key
         self.utxos = list()
+        self.output = None
 
     def public_blinding_key(self):
         return wally.ec_public_key_from_private_key(self.private_blinding_key)
@@ -25,12 +26,8 @@ class Wallet(object):
         return wally.confidential_addr_from_addr_segwit(
             self.unconf_address(), BECH32_FAMILY_TESTNET_LIQUID, BLECH32_FAMILY_TESTNET_LIQUID, self.public_blinding_key())
 
-    def output(self):
-        raise NotImplementedError
-
     def sync(self, url):
         utxos = requests.get(f"{url}/api/address/{self.unconf_address()}/utxo").json()
-        # FIXME: are these unspent
         for utxo in utxos:
             txid = utxo.get("txid")
             vout = utxo.get("vout")
@@ -47,11 +44,14 @@ class Wallet(object):
                 "noncecommitment": utxo.get("noncecommitment"),
                 "tx": tx,
             }
-            output = self.output()
-            self.utxos.append(SpendableElementsUTXO(unspent, output, self.private_blinding_key))
+            self.utxos.append(SpendableElementsUTXO(unspent, self.output, self.private_blinding_key))
 
     def balance(self):
         return _balance(self.utxos)
+
+    @staticmethod
+    def set_witness_script(psbt, idx, utxo):
+        pass
 
     def create_psbt(self, utxos, address, asset_hex, value):
         psbt = wally.psbt_init(2, 0, 0, 0, wally.WALLY_PSBT_INIT_PSET)
@@ -64,7 +64,7 @@ class Wallet(object):
             # Witness UTXO
             wally.psbt_set_input_witness_utxo_from_tx(psbt, idx, utxo.tx, utxo.vout)
             wally.psbt_set_input_utxo_rangeproof(psbt, idx, utxo.rangeproof)
-            # No need to add redeem_script
+            self.set_witness_script(psbt, idx, utxo)
             # Add explicit proofs
             wally.psbt_generate_input_explicit_proofs(psbt, idx, utxo.value, utxo.asset, utxo.abf, utxo.vbf, os.urandom(32))
             # Add key path
@@ -152,12 +152,9 @@ class WalletP2wpkh(Wallet):
     """A Simple wallet consisting in a single P2WPKH address/scriptpubkey"""
     def __init__(self, private_key, private_blinding_key):
         self.private_key = private_key
-        witness_script = wally.ec_public_key_from_private_key(private_key)
-        scriptpubkey = wally.witness_program_from_bytes(witness_script, wally.WALLY_SCRIPT_HASH160)
-        super().__init__(scriptpubkey, private_blinding_key)
-
-    def output(self):
-        return P2wpkhElementsOutput(self.private_key, self.private_blinding_key)
+        output = P2wpkhElementsOutput(private_key, private_blinding_key)
+        super().__init__(output.scriptpubkey, private_blinding_key)
+        self.output = output
 
     @staticmethod
     def set_keypaths(psbt, idx, utxo):
@@ -172,4 +169,35 @@ class WalletP2wpkh(Wallet):
         flags = 0
         for utxo in used_utxos:
             wally.psbt_sign(psbt, utxo.output.key.prv, flags)
+        return wally.psbt_to_base64(psbt, 0)
+
+
+class WalletP2wsh2of3(Wallet):
+    """A Simple wallet consisting in a single P2WSH-2OF3 address/scriptpubkey"""
+    def __init__(self, keys, private_blinding_key):
+        self.keys = keys
+        output = P2wsh2of3ElementsOutput(keys, private_blinding_key)
+        super().__init__(output.scriptpubkey, private_blinding_key)
+        self.output = output
+
+    @staticmethod
+    def set_witness_script(psbt, idx, utxo):
+        wally.psbt_set_input_witness_script(psbt, idx, utxo.output.witness_script)
+
+    @staticmethod
+    def set_keypaths(psbt, idx, utxo):
+        fingerprint = b'\x00' * 4
+        keypaths = wally.map_keypath_public_key_init(len(utxo.output.keys))
+        for key in utxo.output.keys:
+            wally.map_keypath_add(keypaths, key.pub, fingerprint, [0])
+        wally.psbt_set_input_keypaths(psbt, idx, keypaths)
+
+    @staticmethod
+    def sign_psbt(psbt, used_utxos):
+        psbt = wally.psbt_from_base64(psbt, 0)
+        flags = 0
+        for utxo in used_utxos:
+            for key in utxo.output.keys:
+                if key.prv is not None:
+                    wally.psbt_sign(psbt, key.prv, flags)
         return wally.psbt_to_base64(psbt, 0)
