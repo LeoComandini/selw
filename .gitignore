@@ -2,4 +2,4 @@ venv*
 __pycache__*
 build*
 *egg-info*
-examples/t.py
+examples/__*
