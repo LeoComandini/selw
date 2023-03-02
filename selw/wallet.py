@@ -69,27 +69,45 @@ class Wallet(object):
             wally.psbt_generate_input_explicit_proofs(psbt, idx, utxo.value, utxo.asset, utxo.abf, utxo.vbf, os.urandom(32))
             # Add key path
             self.set_keypaths(psbt, idx, utxo)
-        # Add sent output
-        # FIXME: handle asset not L-BTC
+
+        # Fee is fixed
+        fee = 500
         asset_tag = bytes([1]) + h2b_rev(asset_hex)
         lbtc_tag = bytes([1]) + h2b_rev(LBTC_HEX)
-        assert asset_tag == lbtc_tag
-        fee = 500
+
+        # Add sent output
         spk_send, bpub_send = parse_address(address)
         _value = wally.tx_confidential_value_from_satoshi(value)
         txout_send = wally.tx_elements_output_init(spk_send, asset_tag, _value, bpub_send)
         output_idx = wally.psbt_get_num_outputs(psbt)
         wally.psbt_add_tx_output_at(psbt, output_idx, 0, txout_send)
         wally.psbt_set_output_blinder_index(psbt, output_idx, 0)
-        # Add change
-        value_change = _balance(utxos)[asset_hex] - value - fee
-        assert value_change > 0
-        spk_change, bpub_change = parse_address(self.address())
-        _value_change = wally.tx_confidential_value_from_satoshi(value_change)
-        txout_change = wally.tx_elements_output_init(spk_change, asset_tag, _value_change, bpub_change)
-        output_idx = wally.psbt_get_num_outputs(psbt)
-        wally.psbt_add_tx_output_at(psbt, output_idx, 0, txout_change)
-        wally.psbt_set_output_blinder_index(psbt, output_idx, 0)
+
+        # Add change for sent asset
+        value_change = _balance(utxos)[asset_hex] - value
+        if asset_hex == LBTC_HEX:
+            value_change -= fee
+        assert value_change >= 0
+        if value_change > 0:
+            spk_change, bpub_change = parse_address(self.address())
+            _value_change = wally.tx_confidential_value_from_satoshi(value_change)
+            txout_change = wally.tx_elements_output_init(spk_change, asset_tag, _value_change, bpub_change)
+            output_idx = wally.psbt_get_num_outputs(psbt)
+            wally.psbt_add_tx_output_at(psbt, output_idx, 0, txout_change)
+            wally.psbt_set_output_blinder_index(psbt, output_idx, 0)
+
+        if asset_hex != LBTC_HEX:
+            # Add change LBTC
+            value_change = _balance(utxos)[LBTC_HEX] - fee
+            assert value_change >= 0
+            if value_change > 0:
+                spk_change, bpub_change = parse_address(self.address())
+                _value_change = wally.tx_confidential_value_from_satoshi(value_change)
+                txout_change = wally.tx_elements_output_init(spk_change, lbtc_tag, _value_change, bpub_change)
+                output_idx = wally.psbt_get_num_outputs(psbt)
+                wally.psbt_add_tx_output_at(psbt, output_idx, 0, txout_change)
+                wally.psbt_set_output_blinder_index(psbt, output_idx, 0)
+
         # Add fee output
         _fee = wally.tx_confidential_value_from_satoshi(fee)
         txout_fee = wally.tx_elements_output_init(None, lbtc_tag, _fee)
