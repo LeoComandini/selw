@@ -15,7 +15,7 @@ bprv = b'\x01'*32
 w = WalletP2wpkh(prv, bprv)
 w.sync(url)
 balance = w.balance()
-assert balance[LBTC_HEX] > 0, f'Balance is 0, send some funds to {w.address()} and run the script again'
+assert balance.get(LBTC_HEX, 0) > 0, f'Balance is 0, send some funds to {w.address()} and run the script again'
 
 psbt = w.create_psbt(w.utxos, w.address(), LBTC_HEX, 1000)
 psbt = w.blind_psbt(psbt, w.utxos)
