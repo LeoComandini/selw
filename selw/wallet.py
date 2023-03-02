@@ -53,37 +53,6 @@ class Wallet(object):
     def balance(self):
         return _balance(self.utxos)
 
-
-def _balance(utxos):
-    ret = {}
-    for utxo in utxos:
-        asset_hex = b2h_rev(utxo.asset)
-        if asset_hex in ret:
-            ret[asset_hex] += utxo.value
-        else:
-            ret[asset_hex] = utxo.value
-    return ret
-
-
-def parse_address(address):
-    # FIXME: add support for pre-segwit
-    unconf_address = wally.confidential_addr_to_addr_segwit(address, BLECH32_FAMILY_TESTNET_LIQUID, BECH32_FAMILY_TESTNET_LIQUID)
-    scriptpubkey = wally.addr_segwit_to_bytes(unconf_address, BECH32_FAMILY_TESTNET_LIQUID, 0)
-    blinding_public_key = wally.confidential_addr_segwit_to_ec_public_key(address, BLECH32_FAMILY_TESTNET_LIQUID)
-    return scriptpubkey, blinding_public_key
-
-
-class WalletP2wpkh(Wallet):
-    """A Simple wallet consisting in a single P2WPKH address/scriptpubkey"""
-    def __init__(self, private_key, private_blinding_key):
-        self.private_key = private_key
-        witness_script = wally.ec_public_key_from_private_key(private_key)
-        scriptpubkey = wally.witness_program_from_bytes(witness_script, wally.WALLY_SCRIPT_HASH160)
-        super().__init__(scriptpubkey, private_blinding_key)
-
-    def output(self):
-        return P2wpkhElementsOutput(self.private_key, self.private_blinding_key)
-
     def create_psbt(self, utxos, address, asset_hex, value):
         psbt = wally.psbt_init(2, 0, 0, 0, wally.WALLY_PSBT_INIT_PSET)
         for utxo in utxos:
@@ -93,18 +62,13 @@ class WalletP2wpkh(Wallet):
             inp = wally.tx_input_init(utxo.txid, utxo.vout, seq, None, None)
             wally.psbt_add_tx_input_at(psbt, idx, 0, inp)
             # Witness UTXO
-            # TODO: (leo) add tx to utxo
             wally.psbt_set_input_witness_utxo_from_tx(psbt, idx, utxo.tx, utxo.vout)
             wally.psbt_set_input_utxo_rangeproof(psbt, idx, utxo.rangeproof)
             # No need to add redeem_script
             # Add explicit proofs
             wally.psbt_generate_input_explicit_proofs(psbt, idx, utxo.value, utxo.asset, utxo.abf, utxo.vbf, os.urandom(32))
             # Add key path
-            # TODO: (leo)
-            fingerprint = b'\x00' * 4
-            keypaths = wally.map_keypath_public_key_init(1)
-            wally.map_keypath_add(keypaths, utxo.output.key.pub, fingerprint, [0])
-            wally.psbt_set_input_keypaths(psbt, idx, keypaths)
+            self.set_keypaths(psbt, idx, utxo)
         # Add sent output
         # FIXME: handle asset not L-BTC
         asset_tag = bytes([1]) + h2b_rev(asset_hex)
@@ -155,14 +119,6 @@ class WalletP2wpkh(Wallet):
         return wally.psbt_to_base64(psbt, 0)
 
     @staticmethod
-    def sign_psbt(psbt, used_utxos):
-        psbt = wally.psbt_from_base64(psbt, 0)
-        flags = 0
-        for utxo in used_utxos:
-            wally.psbt_sign(psbt, utxo.output.key.prv, flags)
-        return wally.psbt_to_base64(psbt, 0)
-
-    @staticmethod
     def send_psbt(psbt, url):
         psbt = wally.psbt_from_base64(psbt, 0)
         wally.psbt_finalize(psbt)
@@ -171,3 +127,49 @@ class WalletP2wpkh(Wallet):
         txhex = wally.tx_to_hex(tx, flags)
         txid = requests.post(f"{url}/api/tx", data=txhex).text
         return txid
+
+
+def _balance(utxos):
+    ret = {}
+    for utxo in utxos:
+        asset_hex = b2h_rev(utxo.asset)
+        if asset_hex in ret:
+            ret[asset_hex] += utxo.value
+        else:
+            ret[asset_hex] = utxo.value
+    return ret
+
+
+def parse_address(address):
+    # FIXME: add support for pre-segwit
+    unconf_address = wally.confidential_addr_to_addr_segwit(address, BLECH32_FAMILY_TESTNET_LIQUID, BECH32_FAMILY_TESTNET_LIQUID)
+    scriptpubkey = wally.addr_segwit_to_bytes(unconf_address, BECH32_FAMILY_TESTNET_LIQUID, 0)
+    blinding_public_key = wally.confidential_addr_segwit_to_ec_public_key(address, BLECH32_FAMILY_TESTNET_LIQUID)
+    return scriptpubkey, blinding_public_key
+
+
+class WalletP2wpkh(Wallet):
+    """A Simple wallet consisting in a single P2WPKH address/scriptpubkey"""
+    def __init__(self, private_key, private_blinding_key):
+        self.private_key = private_key
+        witness_script = wally.ec_public_key_from_private_key(private_key)
+        scriptpubkey = wally.witness_program_from_bytes(witness_script, wally.WALLY_SCRIPT_HASH160)
+        super().__init__(scriptpubkey, private_blinding_key)
+
+    def output(self):
+        return P2wpkhElementsOutput(self.private_key, self.private_blinding_key)
+
+    @staticmethod
+    def set_keypaths(psbt, idx, utxo):
+        fingerprint = b'\x00' * 4
+        keypaths = wally.map_keypath_public_key_init(1)
+        wally.map_keypath_add(keypaths, utxo.output.key.pub, fingerprint, [0])
+        wally.psbt_set_input_keypaths(psbt, idx, keypaths)
+
+    @staticmethod
+    def sign_psbt(psbt, used_utxos):
+        psbt = wally.psbt_from_base64(psbt, 0)
+        flags = 0
+        for utxo in used_utxos:
+            wally.psbt_sign(psbt, utxo.output.key.prv, flags)
+        return wally.psbt_to_base64(psbt, 0)
